@@ -1,0 +1,352 @@
+<?php
+/**
+ * This file is part of the Appcast module for Drupal
+ * Copyright (c) 2009 Sebastiaan Deckers
+ * License: GNU General Public License version 3 or later
+ *
+ * @file appcast.module
+ *
+ * Module for Drupal to poll an appcast XML feed, mirror the latest software update enclosure and display its details in download buttons.
+ */
+
+/**
+ * Display help and module information.
+ * @param path Path to the page the help message is being displayed at.
+ * @param arg Array that holds the current path as would be returned from arg() function.
+ * @return help User friendly message.
+ */
+function appcast_help ($path, $arg) {
+	$output = '';
+	switch ($path) {
+		case "admin/help#appcast":
+			$output = '<p>'.  t('Polls an appcast, mirrors the latest enclosure and displays download buttons.') .'</p>';
+			break;
+	}
+	return $output;
+}
+
+/**
+ * Add permissions to the user management interface to restrict the settings page. (Drupal 6)
+ */
+function appcast_perm () {
+	return array('change appcast settings');
+}
+
+/**
+ * Add permissions to the user management interface to restrict the settings page. (Drupal 7)
+ */
+function appcast_permission () {
+	return array(
+		'change appcast settings' => array(
+			'title' => t('Change appcast settings'),
+			'description' => t('Edit the feed, display and file mirroring options. Only allow trusted users.')
+		)
+	);
+}
+
+/**
+ * Register form callback for the admin configuration menu.
+ */
+function appcast_menu () {
+	return array(
+		'admin/settings/appcast' => array(
+			'title' => 'Appcast',
+			'description' => t('Configure these settings to determine how the appcast feed is parsed and displayed.'),
+			'page callback' => 'drupal_get_form',
+			'page arguments' => array('_appcast_settings'),
+			'access arguments' => array('change appcast settings'),
+			'type' => MENU_NORMAL_ITEM
+		)
+	);
+}
+
+/**
+ * Register hooks that we expose as templates to themes.
+ */
+function appcast_theme ($existing, $type, $theme, $path) {
+	return array(
+		'appcast_button' => array(
+			'template' => 'appcast-button',
+			'arguments' => array('style' => NULL)
+		)
+	);
+}
+
+/**
+ * Module-wide preprocessor for all templates. Exposes all properties to the template to avoid redundant theme() arguments.
+ * @param arg Reference to the array holding all properties for the template.
+ */
+function appcast_preprocess (&$arg) {
+	$fields = array(
+		'css', 'feed', 'href', 'mirror',
+		'name', 'path', 'size', 'timestamp',
+		'track', 'url', 'version');
+	$config = _appcast_loadConfig($fields);
+	foreach ($fields as $field) {
+		$arg[$field] = $config[$field];
+	}
+	$arg['feed'] = url($arg['feed']);
+	$arg['href'] = url($arg['href']);
+	$arg['sizeKB'] = round($arg['size']/1024, 1);
+	$arg['sizeMB'] = round($arg['size']/(1024*1024), 1);
+	$arg['sizeGB'] = round($arg['size']/(1024*1024*1024), 1);
+}
+
+/**
+ * Display the download button.
+ * @param string $op one of "list", "view", "save" and "configure"
+ * @param integer $delta code to identify the block
+ * @param array $edit only for "save" operation
+ */
+function appcast_block ($op = 'list', $delta = 0, $edit = array()) {
+	if ($op == "list") {
+		return array(
+			array("info" => t('Appcast button')),
+			array("info" => t('Appcast button beta')),
+			array("info" => t('Appcast button narrow')),
+			array("info" => t('Appcast button narrow beta'))
+		);
+	} else if ($op == "configure") {
+		// TODO currently no per-block settings
+	} else if ($op == "save") {
+		// TODO currently no per-block settings
+	} else if ($op == "view") {
+		$css = array('', 'beta', 'narrow', 'narrow beta');
+		return array(
+			'subject' => t('Download'),
+			'content' => theme('appcast_button', $css[$delta])
+		);
+	}
+}
+
+/**
+ * Poll the appcast for software updates
+ */
+function appcast_cron () {
+	_appcast_updateAppcast();
+}
+
+/**
+ * Store latest appcast properties and mirror the enclosure.
+ * @param appcast Optional appcast object. Otherwise fetch the appcast from the feed URL.
+ */
+function _appcast_updateAppcast ($appcast = NULL, $forceUpdate = FALSE) {
+	$retval = FALSE;
+	$config = _appcast_loadConfig(array('name', 'track', 'feed', 'path', 'mirror'));
+	$previous = _appcast_loadConfig(array('size', 'timestamp', 'url', 'version'));
+	$appcast = $appcast ? $appcast : _appcast_latestEntryFromFeed($config['feed'], $config['name'], $config['track']);
+	if ($appcast) {
+		if ($config['mirror'] && !$config['path']) {
+			$config['path'] = file_directory_path() . '/appcast/' . basename($appcast['url']);
+		}
+		$moreRecent = strcmp($previous['timestamp'], $appcast['timestamp']) < 0;
+		$higherVersion = strcmp($previous['version'], $appcast['version']) < 0;
+		if ($forceUpdate || $moreRecent || $higherVersion) {
+			if (!$config['mirror'] || _appcast_downloadUpdate($appcast['url'], $config['path'])) {
+				variable_set('appcast_size', $appcast['size']);
+				variable_set('appcast_timestamp', $appcast['timestamp']);
+				variable_set('appcast_url', $appcast['url']);
+				variable_set('appcast_version', $appcast['version']);
+				$retval = TRUE;
+			}
+		} else {
+			$retval = TRUE;
+		}
+	} else {
+		watchdog('appcast', t('Cannot load appcast: The feed is not available or does not contain an update entry. Check the URL, name and track of the appcast.'), NULL, WATCHDOG_WARNING);
+	}
+	return $retval;
+}
+
+/**
+ * Load configuration data.
+ * @param properties The names of all module variables to load.
+ */
+function _appcast_loadConfig ($properties) {
+	$config = array();
+	foreach ($properties as $property) {
+		$config[$property] = variable_get('appcast_' . $property, NULL);
+	}
+	return $config;
+}
+
+/**
+ * Download the feed and get the latest appcast entry.
+ * @param feedUrl URL of the appcast feed.
+ * @param appName Name of the application to find in the feed.
+ * @param appTrack Track of the update to look for.
+ */
+function _appcast_latestEntryFromFeed ($feedUrl, $appName, $appTrack) {
+	$appcast = array();
+	$dom = new DOMDocument();
+	$dom->load(url($feedUrl, array('absolute' => TRUE)));
+	if ($dom) {
+		$xpath = new DOMXPath($dom);
+		$ns = array(
+			'appcast' => 'http://pandion.im/protocol/appcast/1.0',
+			'atom' => 'http://www.w3.org/2005/Atom'
+		);
+		$xpath->registerNamespace('appcast', $ns['appcast']);
+		$xpath->registerNamespace('atom', $ns['atom']);
+		$nodes = $xpath->query(
+			'/atom:feed' .
+				'/atom:entry' .
+					'[atom:updated]' .
+					'[@appcast:name="' . $appName . '"]' . // TODO escape chars
+					'[@appcast:track="' . $appTrack . '"]' . // TODO escape chars
+					'[@appcast:version]' .
+						'[atom:link[@href and @length and @rel="enclosure"]]');
+		foreach ($nodes as $node) {
+			$timestamp = $node->getElementsByTagName('updated')->item(0)->nodeValue;
+			if (strcmp($timestamp, $appcast['timestamp']) > 0) {
+				$appcast['size'] = $xpath->query('atom:link[@href and @rel="enclosure"]/@length', $node)->item(0)->value;
+				$appcast['timestamp'] = $timestamp;
+				$appcast['url'] = $xpath->query('atom:link[@length and @rel="enclosure"]/@href', $node)->item(0)->value;
+				$appcast['version'] = $node->getAttributeNS($ns['appcast'], 'version');
+			}
+		}
+	}
+	return $appcast;
+}
+
+/**
+ * Write a message to the output or log
+ * @param url URL of the file to download.
+ * @param path Location on disk to store the downloaded file. Relative to the Drupal root.
+ */
+function _appcast_downloadUpdate ($url, $path) {
+	$retval = FALSE;
+	file_check_directory(dirname($dir), FILE_CREATE_DIRECTORY);
+	$fullpath = realpath('.') . '/' . $path;
+	$result = drupal_http_request($url, array('User-Agent' => 'Drupal Appcast Module'));
+	switch ($result->code) {
+		case 200:
+		case 302:
+		case 307:
+			// Safe: Ensures the file is in a safe location like the files directory but we need to be able to store files anywhere on disk.
+			//$retval = file_save_data($result->data, $path, FILE_EXISTS_REPLACE);
+
+			// Unsafe: writes to any location
+			$fp = fopen($fullpath, 'wb');
+			if ($fp) {
+				$retval = fwrite($fp, $result->data);
+				fclose($fp);
+			}
+			if ($retval) {
+				watchdog('appcast', t('Successfully mirrored @url to @path', array('@url' => $url, '@path' => $fullpath)), NULL, WATCHDOG_INFO);
+			} else {
+				watchdog('appcast', t('Cannot save appcast enclosure to local file. Check file access to path: @path', array('@path' => $fullpath)), NULL, WATCHDOG_ERROR);
+			}
+			break;
+		default:
+			watchdog('appcast', t('Enclosure download failed. HTTP status code @code from URL: @url', array('@code' => $result->code, '@url' => $url)), NULL, WATCHDOG_ERROR);
+	}
+	return $retval;
+}
+
+/**
+ * Display module configuration form.
+ */
+function _appcast_settings () {
+	$config = _appcast_loadConfig(array('css', 'name', 'track', 'feed', 'path', 'href', 'mirror'));
+	return system_settings_form(array(
+		'feed' => array(
+			'#type' => 'fieldset',
+			'#title' => t('Appcast feed'),
+			'#collapsible' => TRUE,
+			'#collapsed' => FALSE,
+			'appcast_feed' => array(
+				'#type' => 'textfield',
+				'#title' => t('Appcast feed URL'),
+				'#default_value' => $config['feed'],
+				'#size' => 90,
+				'#maxlength' => 90,
+				'#description' => t('URL of the Atom 1.0 feed containing the appcasts.'),
+				'#required' => TRUE
+			),
+			'appcast_name' => array(
+				'#type' => 'textfield',
+				'#title' => t('Application name'),
+				'#default_value' => $config['name'],
+				'#size' => 30,
+				'#maxlength' => 60,
+				'#description' => t('Name of the software in the appcast feed.'),
+				'#required' => TRUE
+			),
+			'appcast_track' => array(
+				'#type' => 'select',
+				'#title' => t('Application track'),
+				'#default_value' => $config['track'],
+				'#options' => drupal_map_assoc(array('stable', 'beta', 'development')),
+				'#description' => t('Track of the software in the appcast feed.'),
+				'#required' => TRUE
+			)
+		),
+		'button' => array(
+			'#type' => 'fieldset',
+			'#title' => t('Download Button'),
+			'#collapsible' => TRUE,
+			'#collapsed' => FALSE,
+			'appcast_css' => array(
+				'#type' => 'textfield',
+				'#title' => t('CSS class of the download link'),
+				'#default_value' => $config['css'],
+				'#size' => 30,
+				'#maxlength' => 60,
+				'#description' => t('A class name for the containing A element. Use this to style the button with CSS.')
+			),
+			'appcast_href' => array(
+				'#type' => 'textfield',
+				'#title' => t('Download link target'),
+				'#default_value' => $config['href'],
+				'#size' => 90,
+				'#maxlength' => 90,
+				'#description' => t('The download button HREF attrtibute. Typically the download page or the URL of a file. Relative URLs should not start with a slash. Specify &lt;front&gt; for the homepage.')
+			)
+		),
+		'mirror' => array(
+			'#type' => 'fieldset',
+			'#title' => t('Enclosure Mirror'),
+			'#collapsible' => TRUE,
+			'#collapsed' => FALSE,
+			'appcast_mirror' => array(
+				'#type' => 'checkbox',
+				'#title' => t('Mirror the enclosure to the local disk.'),
+				'#return_value' => 1,
+				'#default_value' => $config['mirror'],
+				'#description' => t('Download the appcast enclosure to the local disk so that it can be served from this webserver.')
+			),
+			'appcast_path' => array(
+				'#type' => 'textfield',
+				'#title' => t('Local enclosure mirror path'),
+				'#default_value' => $config['path'],
+				'#size' => 90,
+				'#maxlength' => 90,
+				'#description' => t('Local file path (directory and filename) to store the downloaded package. The path is relative to the Drupal root directory so be careful not to overwrite system files. If empty the file will be stored as @files/appcast/[enclosure_filename]', array('@files' => file_directory_path()))
+			)
+		)
+	));
+}
+
+/**
+ * Validate the module configuration form.
+ */
+function _appcast_settings_validate ($form, &$form_state) {
+	$feedUrl = $form_state['values']['appcast_feed'];
+	$appName = $form_state['values']['appcast_name'];
+	$appTrack = $form_state['values']['appcast_track'];
+
+	$appcast = _appcast_latestEntryFromFeed($feedUrl, $appName, $appTrack);
+	if (!$appcast) {
+		form_set_error('appcast_feed', t('Invalid appcast feed settings. Cannot find the latest appcast. Check the feed URL, application name and application track.'));
+		form_set_error('appcast_name', ' ');
+		form_set_error('appcast_track', ' ');
+	} else {
+		$download = _appcast_updateAppcast($appcast, TRUE);
+		if (!$download) {
+			form_set_error('appcast_feed', t('Failed to download the latest enclosure. Check the log for more information.'));
+			form_set_error('appcast_name', ' ');
+			form_set_error('appcast_track', ' ');
+		}
+	}
+}

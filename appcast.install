@@ -1,0 +1,54 @@
+<?php
+/**
+ * This file is part of the Appcast module for Drupal
+ * Copyright (c) 2009 Sebastiaan Deckers
+ * License: GNU General Public License version 3 or later
+ *
+ * @file appcast.install
+ */
+
+function appcast_install () {
+	variable_set('appcast_css', 'appcast-download');
+	variable_set('appcast_name', '');
+	variable_set('appcast_track', 'stable');
+	variable_set('appcast_feed', '');
+	variable_set('appcast_path', '');
+	variable_set('appcast_href', 'download');
+	variable_set('appcast_mirror', 0);
+
+	variable_set('appcast_size', -1);
+	variable_set('appcast_timestamp', '');
+	variable_set('appcast_url', '');
+	variable_set('appcast_version', '');
+}
+
+function appcast_uninstall () {
+	variable_del('appcast_css');
+	variable_del('appcast_name');
+	variable_del('appcast_track');
+	variable_del('appcast_feed');
+	variable_del('appcast_path');
+	variable_del('appcast_href');
+	variable_del('appcast_mirror');
+
+	variable_del('appcast_size');
+	variable_del('appcast_timestamp');
+	variable_del('appcast_url');
+	variable_del('appcast_version');
+}
+
+function appcast_disable () {
+	$path = file_directory_path() . '/appcast';
+	if (file_exists($path)) {
+		$dir = opendir($path);
+		while ($file = readdir($dir)) {
+			if ($file != '.' && $file != '..') {
+				if (file_exists($path . '/' . $file)) {
+					file_delete($path . '/' . $file);
+				}
+			}
+		} 
+		closedir($dir);
+		rmdir($path);
+	}
+}
