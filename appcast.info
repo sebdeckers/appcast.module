@@ -1,7 +1,8 @@
 ; This file is part of the Appcast module for Drupal
 ; Copyright (c) 2009 Sebastiaan Deckers
 ; License: GNU General Public License version 3 or later
-
+ 
 name = Appcast
 description = Module for Drupal to poll an appcast XML feed, mirror the latest software update enclosure and display its details in download buttons.
+version = 1.0
 core = 6.x
